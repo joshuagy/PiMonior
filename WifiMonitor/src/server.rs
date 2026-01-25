@@ -1,72 +1,77 @@
-use std::sync::Mutex;
+use std::sync::Arc;
 
-use actix_web::middleware::Compress;
-use actix_web::{web, App, HttpResponse, HttpServer, Responder, Result};
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use prometheus_client::encoding::text::encode;
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
+use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-pub enum Method {
+enum HttpMethod {
     Get,
     Post,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct MethodLabels {
-    pub method: Method,
+struct RequestLabels {
+    method: HttpMethod,
 }
 
-pub struct Metrics {
-    requests: Family<MethodLabels, Counter>,
+struct Metrics {
+    requests_total: Family<RequestLabels, Counter>,
 }
 
 impl Metrics {
-    pub fn inc_requests(&self, method: Method) {
-        self.requests.get_or_create(&MethodLabels { method }).inc();
+    fn new(registry: &mut Registry) -> Self {
+        let requests_total = Family::default();
+
+        registry.register(
+            "http_requests_total",
+            "Total number of HTTP requests",
+            requests_total.clone(),
+        );
+
+        Self { requests_total }
+    }
+
+    fn inc_requests(&self, method: HttpMethod) {
+        self.requests_total
+            .get_or_create(&RequestLabels { method })
+            .inc();
     }
 }
 
-pub struct AppState {
-    pub registry: Registry,
-}
+async fn metrics_handler(
+    metrics: web::Data<Arc<Metrics>>,
+    registry: web::Data<Arc<Registry>>,
+) -> impl Responder {
+    let mut buffer = String::new();
+    encode(&mut buffer, &registry).unwrap();
 
-pub async fn metrics_handler(state: web::Data<Mutex<AppState>>) -> Result<HttpResponse> {
-    let state = state.lock().unwrap();
-    let mut body = String::new();
-    encode(&mut body, &state.registry).unwrap();
-    Ok(HttpResponse::Ok()
+    HttpResponse::Ok()
         .content_type("application/openmetrics-text; version=1.0.0; charset=utf-8")
-        .body(body))
+        .body(buffer)
 }
 
-pub async fn some_handler(metrics: web::Data<Metrics>) -> impl Responder {
-    metrics.inc_requests(Method::Get);
-    "okay".to_string()
+async fn hello_handler(metrics: web::Data<Arc<Metrics>>) -> impl Responder {
+    metrics.inc_requests(HttpMethod::Get);
+    "hello"
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let metrics = web::Data::new(Metrics {
-        requests: Family::default(),
-    });
-    let mut state = AppState {
-        registry: Registry::default(),
-    };
-    state
-        .registry
-        .register("requests", "Count of requests", metrics.requests.clone());
-    let state = web::Data::new(Mutex::new(state));
+    let mut registry = Registry::default();
+    let metrics = Arc::new(Metrics::new(&mut registry));
+
+    let registry = Arc::new(registry);
 
     HttpServer::new(move || {
         App::new()
-            .wrap(Compress::default())
-            .app_data(metrics.clone())
-            .app_data(state.clone())
-            .service(web::resource("/metrics").route(web::get().to(metrics_handler)))
-            .service(web::resource("/handler").route(web::get().to(some_handler)))
+            .app_data(web::Data::new(metrics.clone()))
+            .app_data(web::Data::new(registry.clone()))
+            .route("/", web::get().to(hello_handler))
+            .route("/metrics", web::get().to(metrics_handler))
     })
         .bind(("127.0.0.1", 8080))?
         .run()

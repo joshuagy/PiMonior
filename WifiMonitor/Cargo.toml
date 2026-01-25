@@ -12,3 +12,9 @@ anyhow = "1"
 tempfile = "3"
 url = "2"
 prometheus-client = "0.24.0"
+actix-web = "4.12.1"
+time = "0.3.46"
+
+[[bin]]
+name="server"
+path="src/server.rs"
