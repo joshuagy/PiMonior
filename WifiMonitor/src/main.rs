@@ -3,14 +3,14 @@ use tempfile::Builder;
 use std::time::{SystemTime};
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
 use prometheus_client::encoding::text::encode;
-use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 use prometheus_client::metrics::gauge::Gauge;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::sync::atomic::AtomicU64;
 use std::thread;
 use std::thread::sleep;
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{rt, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::dev::ServerHandle;
 
 static DEBIT:f64 = 0.0;
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
@@ -53,60 +53,90 @@ async fn metrics_handler(metrics: web::Data<Arc<Metrics>>,registry: web::Data<Ar
         .body(buffer)
 }
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
+fn main(){
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+
     let mut registry = Registry::default();
     let metrics = Arc::new(Metrics::new(&mut registry));
     let registry = Arc::new(registry);
+    let (tx, rx) = mpsc::channel();
 
-    let metrics_clone = metrics.clone();
+    log::info!("spawning thread for server");
+    thread::spawn({
+        let tx = tx.clone();          // clone du sender si nécessaire
+        let metrics = Arc::clone(&metrics);
+        let registry = Arc::clone(&registry);
+        move || {
+            let server_future = run_app(tx, metrics, registry);
+            rt::System::new().block_on(server_future)
+        }
+    });
 
-    download(metrics_clone).await;
+    let server_handle = rx.recv().unwrap();
 
-    HttpServer::new(move || {
+    log::info!("spawning thread for download");
+    thread::spawn({
+        let metrics = Arc::clone(&metrics);
+        move || {
+            let server_future2 = download(metrics);
+            rt::System::new().block_on(server_future2)
+        }
+    });
+
+    loop { }
+}
+
+async fn run_app(tx: mpsc::Sender<ServerHandle>,metrics: Arc<Metrics>, registry: Arc<Registry>) -> std::io::Result<()> {
+    log::info!("starting HTTP server at http://localhost:9090");
+
+    // srv is server controller type, `dev::Server`
+    let server = HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(metrics.clone()))
             .app_data(web::Data::new(registry.clone()))
             .route("/metrics", web::get().to(metrics_handler))
     })
-        .bind(("127.0.0.1", 8080)).expect("Failed to bind")
-        .run()
-        .await
+        .bind(("127.0.0.1", 9090))?
+        .workers(2)
+        .run();
 
-    //Curl https://speed.cloudflare.com/__down?bytes=100000000 --> Get start time / get endtime = duration fore 100mb
+    // Send server handle back to the main thread
+    let _ = tx.send(server.handle());
+
+    server.await
 }
 
-async fn download(metrics: Arc<Metrics>) -> Result<()> {
-    let now = SystemTime::now();
 
+async fn download(metrics: Arc<Metrics>) -> Result<()>  {
     let tmp_dir = Builder::new().prefix("example").tempdir()?;
     let target = "https://speed.cloudflare.com/__down?bytes=10000000";
-    let response = reqwest::blocking::get(target)?;
 
-    let mut dest = {
-        let fname = response
-            .url()
-            .path_segments()
-            .and_then(|segments| segments.last())
-            .and_then(|name| if name.is_empty() { None } else { Some(name) })
-            .unwrap_or("tmp.bin");
+    loop {
+        let now = SystemTime::now();
+        let response = reqwest::get(target).await?;
+        let mut dest = {
+            let fname = response
+                .url()
+                .path_segments()
+                .and_then(|segments| segments.last())
+                .and_then(|name| if name.is_empty() { None } else { Some(name) })
+                .unwrap_or("tmp.bin");
 
-        println!("file to download: '{}'", fname);
-        let fname = tmp_dir.path().join(fname);
-        println!("will be located under: '{:?}'", fname);
-    };
-    let _ = response.bytes()?;
-    match now.elapsed() {
-        Ok(elapsed) => {
-            let float: f64 = (10.0 / elapsed.as_secs_f64()) * 8.0;
-            println!("Download: {float} Mb/s", );
-            metrics.requests.set(float);
+            println!("file to download: '{}'", fname);
+            let fname = tmp_dir.path().join(fname);
+            println!("will be located under: '{:?}'", fname);
+        };
+        let _ = response.bytes().await?;
+        match now.elapsed() {
+            Ok(elapsed) => {
+                let float: f64 = (10.0 / elapsed.as_secs_f64()) * 8.0;
+                async { println!("Download: {float} Mb/s"); }.await;
+                metrics.requests.set(float);
+            }
+            Err(e) => {
+                println!("Back to the futur {e:?}");
+            }
         }
-        Err(e) => {
-            println!("Back to the futur {e:?}");
-        }
+        sleep(std::time::Duration::from_secs(20));
     }
-    sleep(std::time::Duration::from_secs(60));
-
-    Ok(())
 }
