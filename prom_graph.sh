@@ -21,16 +21,8 @@ else
   sudo docker run -d \
     --name prometheus \
     -p 9090:9090 \
+    --add-host=host.docker.internal:host-gateway \
     -v ./prometheus.yml:/etc/prometheus/prometheus.yml \
     -v prometheus-data:/prometheus \
     prom/prometheus
-fi
-
-# Starting/pulling Pushgateway
-if [[ $(sudo docker ps -a) == */pushgateway* ]]; then
-  sudo docker container start pushgateway
-  echo "Starting Pushgateway."
-else
-  echo "Creating Docker image and container for Pushgateway."
-  sudo docker run -d --name pushgateway -p 9091:9091 prom/pushgateway
 fi
