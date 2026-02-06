@@ -19,3 +19,4 @@ path="src/main.rs"
 [[bin]]
 name="raspberry_pi"
 path="src/raspberry_pi.rs"
+# cross build --target aarch64-unknown-linux-gnu --bin raspberry_pi --release

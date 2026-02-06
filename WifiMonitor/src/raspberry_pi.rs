@@ -137,6 +137,6 @@ async fn download(metrics: Arc<Metrics>) -> Result<()>  {
                 println!("Back to the futur {e:?}");
             }
         }
-        sleep(std::time::Duration::from_secs(60));
+        sleep(std::time::Duration::from_secs(300));
     }
 }

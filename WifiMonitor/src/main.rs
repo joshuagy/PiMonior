@@ -1,3 +1,4 @@
+use std::process::{Command, Stdio};
 use anyhow::Result;
 use tempfile::Builder;
 use std::time::{SystemTime};
@@ -34,6 +35,11 @@ impl Metrics {
         registry.register(
             "download_link",
             "Download speed",
+            requests.clone(),
+        );
+        registry.register(
+            "cpu_temp",
+            "CPU temp",
             requests.clone(),
         );
 
@@ -78,7 +84,7 @@ fn main(){
     thread::spawn({
         let metrics = Arc::clone(&metrics);
         move || {
-            let server_future2 = download(metrics);
+            let server_future2 = metrics_calculator(metrics);
             rt::System::new().block_on(server_future2)
         }
     });
@@ -107,7 +113,7 @@ async fn run_app(tx: mpsc::Sender<ServerHandle>,metrics: Arc<Metrics>, registry:
 }
 
 
-async fn download(metrics: Arc<Metrics>) -> Result<()>  {
+async fn metrics_calculator(metrics: Arc<Metrics>) -> Result<()>  {
     let tmp_dir = Builder::new().prefix("example").tempdir()?;
     let target = "https://speed.cloudflare.com/__down?bytes=10000000";
 
@@ -137,6 +143,19 @@ async fn download(metrics: Arc<Metrics>) -> Result<()>  {
                 println!("Back to the futur {e:?}");
             }
         }
-        sleep(std::time::Duration::from_secs(60));
+
+        let output = Command::new("vcgencmd measure_temp")
+            .stdout(Stdio::piped())
+            .output();
+
+        match output {
+            Ok(content) => println!("{}", String::from_utf8(content.stdout).unwrap()),
+            Err(e) => println!("Error: {}", e),
+        }
+
+
+        println!("End of gathering measurement");
+
+        sleep(std::time::Duration::from_secs(300));
     }
 }
