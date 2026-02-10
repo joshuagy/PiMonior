@@ -1,4 +1,5 @@
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use anyhow::Result;
 use tempfile::Builder;
 use std::time::{SystemTime};
@@ -25,25 +26,27 @@ pub struct RequestLabels {
 }
 
 pub struct Metrics {
-    pub requests: Gauge<f64, AtomicU64>,
+    pub download: Gauge<f64, AtomicU64>,
+    pub cpu: Gauge<f64, AtomicU64>,
 }
 
 impl Metrics {
     fn new(registry: &mut Registry) -> Self {
-        let requests = Gauge::default();
+        let download = Gauge::default();
+        let cpu = Gauge::default();
 
         registry.register(
             "download_link",
             "Download speed",
-            requests.clone(),
+            download.clone(),
         );
         registry.register(
             "cpu_temp",
             "CPU temp",
-            requests.clone(),
+            cpu.clone(),
         );
 
-        Self { requests }
+        Self { download, cpu }
     }
 }
 pub struct AppState {
@@ -137,22 +140,52 @@ async fn metrics_calculator(metrics: Arc<Metrics>) -> Result<()>  {
             Ok(elapsed) => {
                 let float: f64 = (10.0 / elapsed.as_secs_f64()) * 8.0;
                 async { println!("Download: {float} Mb/s"); }.await;
-                metrics.requests.set(float);
+                metrics.download.set(float);
             }
             Err(e) => {
                 println!("Back to the futur {e:?}");
             }
         }
 
-        let output = Command::new("vcgencmd measure_temp")
+        let sensor = Command::new("sensors")
             .stdout(Stdio::piped())
-            .output();
+            .spawn()
+            .unwrap();
 
-        match output {
-            Ok(content) => println!("{}", String::from_utf8(content.stdout).unwrap()),
-            Err(e) => println!("Error: {}", e),
-        }
+        let awk = Command::new("awk")
+            .arg("{ print $2 }")
+            .stdin(Stdio::from(sensor.stdout.unwrap()))
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
 
+        let grep = Command::new("grep")
+            .arg("+")
+            .stdin(Stdio::from(awk.stdout.unwrap()))
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let cut = Command::new("cut")
+            .arg("-c")
+            .arg("2-5")
+            .stdin(Stdio::from(grep.stdout.unwrap()))
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let head = Command::new("head")
+            .arg("-n")
+            .arg("1")
+            .stdin(Stdio::from(cut.stdout.unwrap()))
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let output = head.wait_with_output().unwrap();
+        let result = &str::from_utf8(&output.stdout).unwrap()[0..4];
+        println!("{result}");
+        metrics.cpu.set(f64::from_str(result)?);
 
         println!("End of gathering measurement");
 

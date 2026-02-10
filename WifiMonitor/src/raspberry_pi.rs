@@ -1,3 +1,5 @@
+use std::process::{Command, Stdio};
+use std::str::FromStr;
 use anyhow::Result;
 use tempfile::Builder;
 use std::time::{SystemTime};
@@ -24,20 +26,27 @@ pub struct RequestLabels {
 }
 
 pub struct Metrics {
-    pub requests: Gauge<f64, AtomicU64>,
+    pub download: Gauge<f64, AtomicU64>,
+    pub cpu: Gauge<f64, AtomicU64>,
 }
 
 impl Metrics {
     fn new(registry: &mut Registry) -> Self {
-        let requests = Gauge::default();
+        let download = Gauge::default();
+        let cpu = Gauge::default();
 
         registry.register(
             "download_link",
             "Download speed",
-            requests.clone(),
+            download.clone(),
+        );
+        registry.register(
+            "cpu_temp",
+            "CPU temp",
+            cpu.clone(),
         );
 
-        Self { requests }
+        Self { download, cpu }
     }
 }
 pub struct AppState {
@@ -78,7 +87,7 @@ fn main(){
     thread::spawn({
         let metrics = Arc::clone(&metrics);
         move || {
-            let server_future2 = download(metrics);
+            let server_future2 = metrics_calculator(metrics);
             rt::System::new().block_on(server_future2)
         }
     });
@@ -107,7 +116,7 @@ async fn run_app(tx: mpsc::Sender<ServerHandle>,metrics: Arc<Metrics>, registry:
 }
 
 
-async fn download(metrics: Arc<Metrics>) -> Result<()>  {
+async fn metrics_calculator(metrics: Arc<Metrics>) -> Result<()>  {
     let tmp_dir = Builder::new().prefix("example").tempdir()?;
     let target = "https://speed.cloudflare.com/__down?bytes=10000000";
 
@@ -131,12 +140,55 @@ async fn download(metrics: Arc<Metrics>) -> Result<()>  {
             Ok(elapsed) => {
                 let float: f64 = (10.0 / elapsed.as_secs_f64()) * 8.0;
                 async { println!("Download: {float} Mb/s"); }.await;
-                metrics.requests.set(float);
+                metrics.download.set(float);
             }
             Err(e) => {
                 println!("Back to the futur {e:?}");
             }
         }
+
+        let sensor = Command::new("sensors")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let awk = Command::new("awk")
+            .arg("{ print $2 }")
+            .stdin(Stdio::from(sensor.stdout.unwrap()))
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let grep = Command::new("grep")
+            .arg("+")
+            .stdin(Stdio::from(awk.stdout.unwrap()))
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let cut = Command::new("cut")
+            .arg("-c")
+            .arg("2-5")
+            .stdin(Stdio::from(grep.stdout.unwrap()))
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let head = Command::new("head")
+            .arg("-n")
+            .arg("1")
+            .stdin(Stdio::from(cut.stdout.unwrap()))
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let output = head.wait_with_output().unwrap();
+        let result = &str::from_utf8(&output.stdout).unwrap()[0..4];
+        println!("{result}");
+        metrics.cpu.set(f64::from_str(result)?);
+
+        println!("End of gathering measurement");
+
         sleep(std::time::Duration::from_secs(300));
     }
 }
